@@ -56,10 +56,10 @@ if [[ $name && $desc && $folder && -e $rcon_client ]]; then
     echo "mcctl engaged!"
 
     # Add self to /usr/sbin for convenience
-    sbin="/usr/sbin/$0"
+    sbin="/usr/sbin/$(basename "$0" | cut -d "." -f 1)"
     if [[ ! -e $sbin ]]; then
         printf "Allowing use from /usr/sbin: '%s'\n" "$sbin"
-        ln -s "$(dirname -- "$(readlink -f -- "$0")")" "$sbin"
+        ln -s "$(realpath "$0")" "$sbin"
     fi
 
     # Which server instance are we working with?
