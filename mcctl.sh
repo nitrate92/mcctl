@@ -68,7 +68,7 @@ if [[ $name && $desc && $folder && -e $rcon_client ]]; then
 
     function GetServerProperty() {
         # $1 = property (i.e. server-port)
-        echo grep "$1" "$base_working_dir/$2/server.properties" | cut -d "=" -f 2
+        grep "$1" "$base_working_dir/$2/server.properties" | cut -d "=" -f 2
     }
 
     # Default rcon password
