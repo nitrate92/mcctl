@@ -40,17 +40,17 @@ while getopts ":n:d:f:r:h" option; do
         ;;
     h)
         Help
-        exit
+        exit 0
         ;;
     \?)
         echo "Error: Invalid option"
-        exit
+        exit 1
         ;;
     esac
 done
 
-# Ensure required arguments have been passed
-if [[ $name && $desc && $folder ]]; then
+# Ensure required arguments have been passed and we have a way to use rcon
+if [[ $name && $desc && $folder && -e $rcon_client ]]; then
     active_instance=$(systemctl list-units --type=service --state=running,active | grep -o "minecraft-.*\.service")
 
     echo "mcctl engaged!"
@@ -110,21 +110,30 @@ EOF
     fi
 
     # Let's get this over with
+    name_fmt="minecraft-$name.service"
+    server_port=$(GetServerProperty "server-port" "$name")
     systemctl daemon-reload
-    # If we're updating an existing service that's running, just restart it. If not, enable the service, then start it.
-    if [[ $active_instance = "minecraft-$name.service" ]]; then
-        systemctl restart "minecraft-$name.service"
+
+    # The order these conditions happen in is very important. We want to check if the running instance
+    # is the same one we're working on. If not, compare the port numbers between the running instance
+    # and the one we're working on. If they are the same, see if any processes are using our instance's
+    # port. Finally, if all is good, enable and start the newly created instance.
+    if [[ $active_instance = "$name_fmt" ]]; then
+        systemctl restart "$name_fmt"
+    elif [[ $(GetServerProperty "server-port" "$($active_instance | cut -d "." -f 1)") = "$server_port" ]]; then
+        echo "Port '$server_port' is conflicting with another running instance of Minecraft '$active_instance'. It is being disabled and stopped in favor of '$name_fmt'."
+        systemctl disable "minecraft-$active_instance" && systemctl stop "minecraft-$active_instance"
+    elif [[ $(netstat -putln | grep ":$server_port" | awk '{print $7}') ]]; then
+        printf "Error: Port '%s' is conflicting with running process(es):\n$(netstat -putln | grep ":$server_port" | awk '{print $7}')\nPlease stop the conflicting processes, or change 'server-port'\n" "$server_port"
+        exit 1
     else
-        # Disable and shut down another server if it conflicts with the port used by this instance
-        if [[ $(GetServerProperty "server-port" "$($active_instance | cut -d "." -f 1)") = $(GetServerProperty "server-port" "$name") ]]; then
-            systemctl disable "minecraft-$active_instance" && systemctl stop "minecraft-$active_instance"
-        fi
-        systemctl enable "minecraft-$name.service" && systemctl start "minecraft-$name.service"
+        systemctl enable "$name_fmt" && systemctl start "$name_fmt"
     fi
 
     exit 0
 elif [[ ! -e $rcon_client ]]; then
     echo "Error: Rcon client not found at '${rcon_client}'"
+    exit 1
 else
     Help
 fi
