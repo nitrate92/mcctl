@@ -1,5 +1,5 @@
 # mcctl
-Minecraft server control via systemd. This is only known to work on Debian 12.
+Minecraft server control via systemd. I am only testing this on Debian 13.
 
 ```
 usage: mcctl -n <name> -d <description> -f <folder_name> -r [<rcon_password>]"
