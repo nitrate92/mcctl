@@ -12,20 +12,21 @@ if [[ $(/usr/bin/id -u) = 0 ]]; then
 fi
 
 # You can change these to suit your needs
-base_working_dir="${HOME}/minecraft"
+base_working_dir="/opt/minecraft"
 rcon_client="${base_working_dir}/common/mcrcon-0.7.2-linux-x86-64/mcrcon"
+rcon_port="25575"
 
 function Help() {
-    echo "usage: $0 -n <name> -d <description> -f <folder_name> -r [<rcon_password>] -w"
+    echo "usage: $0 -n <name> -d [<description>] -f <folder_name> -r [<rcon_password>] -w"
     echo "  -n      String representing the unit name"
-    echo "  -d      String representing the unit description"
+    echo "  -d      String representing the unit description (OPTIONAL)"
     echo "  -f      String representing the folder name following '${base_working_dir}' containing your server files"
     echo "  -r      String representing an rcon password (OPTIONAL)"
     echo "  -w      Flag representing use of server whitelist (OPTIONAL)"
     echo "  -h      Display this help menu"
 }
 
-while getopts ":n:d:f:r:w:h" option; do
+while getopts ":n:d:f:r:wh" option; do
     case $option in
     n)
         name=$OPTARG
@@ -58,33 +59,42 @@ if [[ $USER = "root" ]]; then
     echo "Error: I will not let you run a server using the root account! Please switch to a standard user account and run this with 'sudo'."
     exit 1
 elif [[ $(ps --no-headers -o comm 1) != "systemd" ]]; then
-    echo "Error: Could not determine if systemd is on this system."
+    echo "Error: Could not determine if systemd is present on this system."
     exit 1
 elif [[ ! -e $rcon_client ]]; then
     echo "Error: Rcon client not found at '${rcon_client}'."
     exit 1
-elif [[ $name && $desc && $folder ]]; then
+elif [[ $name && $folder ]]; then
     echo "mcctl engaged!"
 
     # Add self to /usr/sbin for convenience
     sbin="/usr/sbin/$(basename "$0" | cut -d "." -f 1)"
-    if [[ ! -e $sbin ]]; then
+    if [ ! -L $sbin ]; then
         printf "Allowing use from /usr/sbin: '%s'\n" "$sbin"
         ln -s "$(realpath "$0")" "$sbin"
     fi
 
     # Are services already running?
-    active_instance=$(systemctl list-units --type=service --state=running,active | grep -o "minecraft-.*\.service")
+    active_instance=$(systemctl list-units --type=service --state=running,active | grep -o "minecraft-.*\.service" | awk '{print $1}')
 
     # Default rcon password
     if [[ ! $rcon_password ]]; then
         rcon_password="DeditatedWAM69"
     fi
 
-    # Default whitelist
-    if [[ ! $whitelist_enable ]]; then
+    # Handle boolean for both whitelist properties in config
+    if [[ $whitelist_enable -ne "true" ]]; then
         whitelist_enable="false"
     fi
+
+    # Make sure our base directory belongs to "minecraft"
+    if ! id "minecraft" >/dev/null 2>&1; then
+        echo "Creating user 'minecraft'."
+        useradd minecraft
+        passwd minecraft
+    fi
+
+    chown -R minecraft:minecraft "$base_working_dir"
 
     # Which server instance are we working with?
     working_dir="${base_working_dir}/${folder}"
@@ -94,6 +104,7 @@ elif [[ $name && $desc && $folder ]]; then
     # Conveniently pull any one value from server.properties
     function GetServerProperty() {
         # $1 = property (i.e. server-port)
+        # $2 = particular server folder
         grep "$1" "$base_working_dir/$2/server.properties" | cut -d "=" -f 2
     }
 
@@ -115,11 +126,11 @@ After=network-online.target
 Type=Simple
 SuccessExitStatus=0 1
 ExecStart=bash ${run_script}
-ExecStop=bash -c '../common/mcrcon-0.7.2-linux-x86-64/mcrcon -p ${rcon_password} stop'
+ExecStop=bash -c '${rcon_client} -p ${rcon_password} -P ${rcon_port} stop'
 WorkingDirectory=${working_dir}
 Restart=on-failure
-User=${USER}
-Group=$(/usr/bin/id -g "${USER}")
+User=minecraft
+Group=minecraft
 
 [Install]
 WantedBy=network-online.target
@@ -128,7 +139,8 @@ EOF
     # Make sure the server config exists before we try playing with it
     if [[ -e "$working_dir/server.properties" ]]; then
         cp "$working_dir/server.properties" "$working_dir/server.properties.bak"
-        sed -i -r "s/^enable-rcon=.*/enable-rcon=true/g ; s/^enforce-whitelist=.*/enforce-whitelist=${whitelist_enable}/g; s/^rcon\.password=.*/rcon\.password=${rcon_password}/g ; s/^white-list=.*/white-list=${whitelist_enable}/g;" "$working_dir/server.properties"
+        # TODO: Handle existence of config without existence of the properties we want to modify
+        sed -i -r "s/^enable-rcon=.*/enable-rcon=true/g; s/^enforce-whitelist=.*/enforce-whitelist=${whitelist_enable}/g; s/^rcon\.password=.*/rcon\.password=${rcon_password}/g; s/^rcon\.port=.*/rcon\.port=${rcon_port}/g; s/^white-list=.*/white-list=${whitelist_enable}/g;" "$working_dir/server.properties"
     fi
 
     # Let's get this over with
@@ -146,7 +158,7 @@ EOF
         echo "Port '$server_port' is conflicting with another running instance of Minecraft '$active_instance'. It is being disabled and stopped in favor of '$name_fmt'."
         systemctl disable "minecraft-$active_instance" && systemctl stop "minecraft-$active_instance"
     elif [[ $(netstat -putln | grep ":$server_port" | awk '{print $7}') ]]; then
-        printf "Error: Port '%s' is conflicting with running process(es):\n$(netstat -putln | grep ":$server_port" | awk '{print $7}')\nPlease stop the conflicting processes, or change 'server-port'.\n" "$server_port"
+        printf "Error: Port '%s' is conflicting with running process(es):\n\t$(netstat -putln | grep ":$server_port" | awk '{print $7}')\nPlease stop the conflicting processes, or change 'server-port'.\n" "$server_port"
         exit 1
     else
         systemctl enable "$name_fmt" && systemctl start "$name_fmt"
