@@ -76,6 +76,7 @@ elif [[ $name && $folder ]]; then
 
     # Are services already running?
     active_instance=$(systemctl list-units --type=service --state=running,active | grep -o "minecraft-.*\.service" | awk '{print $1}')
+    active_instance_sole_name=$(echo $active_instance | cut -d "-" -f 2 | cut -d "." -f 1)
 
     # Default rcon password
     if [[ ! $rcon_password ]]; then
@@ -154,7 +155,7 @@ EOF
     # port. Finally, if all is good, enable and start the newly created instance.
     if [[ $active_instance = "$name_fmt" ]]; then
         systemctl restart "$name_fmt"
-    elif [[ $(GetServerProperty "server-port" "$($active_instance | cut -d "." -f 1)") = "$server_port" ]]; then
+    elif [[ $(GetServerProperty "server-port" "$active_instance_sole_name") = "$server_port" ]]; then
         echo "Port '$server_port' is conflicting with another running instance of Minecraft '$active_instance'. It is being disabled and stopped in favor of '$name_fmt'."
         systemctl disable "minecraft-$active_instance" && systemctl stop "minecraft-$active_instance"
     elif [[ $(netstat -putln | grep ":$server_port" | awk '{print $7}') ]]; then
