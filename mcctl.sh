@@ -11,54 +11,84 @@ if [[ $(/usr/bin/id -u) = 0 ]]; then
     HOME=$(eval echo ~"$USER")
 fi
 
-# You can change these to suit your needs
-base_working_dir="/opt/minecraft"
-rcon_client="${base_working_dir}/common/mcrcon-0.7.2-linux-x86-64/mcrcon"
-rcon_port="25575"
-
 function Help() {
-    echo "usage: $0 -n <name> -d [<description>] -f <folder_name> -r [<rcon_password>] -w"
-    echo "  -n      String representing the unit name"
-    echo "  -d      String representing the unit description (OPTIONAL)"
-    echo "  -f      String representing the folder name following '${base_working_dir}' containing your server files"
-    echo "  -r      String representing an rcon password (OPTIONAL)"
-    echo "  -w      Flag representing use of server whitelist (OPTIONAL)"
-    echo "  -h      Display this help menu"
+cat <<EOD
+Usage: $0 -n <name> -d [<description>] -f <folder_name> -r [<rcon_password>] -w
+Set up Minecraft servers using systemd.
+
+  -n, --name                  Unit name
+  -d, --description           Unit description (OPTIONAL)
+  -f, --folder                Folder name following '${base_working_dir}' containing your server files
+  -r, --rcon-password         Rcon password, default is random (OPTIONAL)
+  -w, --whitelist             Flag representing use of server whitelist (OPTIONAL)
+  -o, --output-final-unit     Print the contents of the created systemd unit
+  -h, --help                  Display this help and exit
+
+Code and revisions <https://github.com/nitrate92/mcctl>
+EOD
 }
 
-while getopts ":n:d:f:r:wh" option; do
-    case $option in
-    n)
-        name=$OPTARG
+# DEFAULTS
+base_working_dir="/opt/minecraft"
+server_port="25565"
+rcon_client="${base_working_dir}/common/mcrcon-0.7.2-linux-x86-64/mcrcon"
+rcon_port="25575"
+whitelist_enable="false"
+
+VALID_ARGS=$(getopt -o n:p:d:f:r:P:woh --long name:,server-port:,description:,folder:,rcon-password:,rcon-port:,whitelist,output-final-unit,help -- "$@")
+if [[ $? -ne 0 ]]; then
+    Help
+    exit 0
+fi
+
+eval set -- "$VALID_ARGS"
+while [ : ]; do
+  case "$1" in
+    -n | --name)
+        name=$2
+        shift 2
         ;;
-    d)
-        desc=$OPTARG
+    -p | --server-port)
+        server_port=$2
+        shift 2
         ;;
-    f)
-        folder=$OPTARG
+    -d | --description)
+        desc=$2
+        shift 2
         ;;
-    r)
-        rcon_password=$OPTARG
+    -f | --folder)
+        folder=$2
+        shift 2
         ;;
-    w)
-        whitelist_enable="true"
+    -r | --rcon-password)
+        rcon_password=$2
+        shift 2
         ;;
-    h)
+    -P | --rcon-port)
+        rcon_port=$2
+        shift 2
+        ;;
+    -w | --whitelist)
+        whitelist="true"
+        shift
+        ;;
+    -o | --output-final-unit)
+        output_final_unit="true"
+        shift
+        ;;
+    -h | --help)
         Help
         exit 0
+        shift
         ;;
-    \?)
-        echo "Error: Invalid option"
-        exit 1
+    --) shift;
+        break
         ;;
-    esac
+  esac
 done
 
-# Ensure required arguments have been passed and we have a way to use rcon
-if [[ $USER = "root" ]]; then
-    echo "Error: I will not let you run a server using the root account! Please switch to a standard user account and run this with 'sudo'."
-    exit 1
-elif [[ $(ps --no-headers -o comm 1) != "systemd" ]]; then
+# Make sure we can do this thing, these must come in order of importance
+if [[ $(ps --no-headers -o comm 1) != "systemd" ]]; then
     echo "Error: Could not determine if systemd is present on this system."
     exit 1
 elif [[ ! -e $rcon_client ]]; then
@@ -78,29 +108,23 @@ elif [[ $name && $folder ]]; then
     active_instance=$(systemctl list-units --type=service --state=running,active | grep -o "minecraft-.*\.service" | awk '{print $1}')
     active_instance_sole_name=$(echo $active_instance | cut -d "-" -f 2 | cut -d "." -f 1)
 
-    # Default rcon password
+    # If we don't specify anything, just randomly generate one.
     if [[ ! $rcon_password ]]; then
-        rcon_password="DeditatedWAM69"
+        rcon_password=$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13; echo)
     fi
 
-    # Handle boolean for both whitelist properties in config
-    if [[ $whitelist_enable -ne "true" ]]; then
-        whitelist_enable="false"
-    fi
-
-    # Make sure our base directory belongs to "minecraft"
+    # Make sure our base directory belongs to "minecraft" for security reasons
     if ! id "minecraft" >/dev/null 2>&1; then
         echo "Creating user 'minecraft'."
         useradd minecraft
         passwd minecraft
     fi
 
-    chown -R minecraft:minecraft "$base_working_dir"
-
-    # Which server instance are we working with?
-    working_dir="${base_working_dir}/${folder}"
-    # Which script should we pick to run the server? We'll try to determine this automatically.
-    run_script=$(find "$working_dir" -regextype sed -iregex ".*\(start|server|run\)*\.sh" | head -1)
+    # stat can do this too, but this is consistent across more platforms
+    if [[ $(ls -ld "$base_working_dir" | awk '{print $3":"$4}') != "minecraft:minecraft" ]]; then
+        echo "User and group 'minecraft' is taking ownership of '$base_working_dir'"
+        chown -R minecraft:minecraft "$base_working_dir"
+    fi
 
     # Conveniently pull any one value from server.properties
     function GetServerProperty() {
@@ -116,8 +140,15 @@ elif [[ $name && $folder ]]; then
         touch "$service_file"
     fi
 
-    # Write out our systemd unit. This will run our Minecraft instance as the current user!
-    echo "Writing ${service_file}..."
+    # Which server instance are we working with?
+    working_dir="${base_working_dir}/${folder}"
+
+    # Which script should we pick to run the server? We'll try to determine this automatically.
+    # TODO: MAKE CONFIGURABLE
+    run_script=$(find "$working_dir" -regextype sed -iregex ".*\(start|server|run\)*\.sh" | head -1)
+
+    # Write out our systemd unit. This will run our Minecraft instance as the 'minecraft' user!
+    echo "Writing '${service_file}'..."
     cat >"$service_file" <<EOF
 [Unit]
 Description=${desc}
@@ -137,11 +168,25 @@ Group=minecraft
 WantedBy=network-online.target
 EOF
 
-    # Make sure the server config exists before we try playing with it
+    if [[ $output_final_unit = "true" ]]; then
+        printf "\n$(cat "$service_file")\n\n"
+    fi
+
+    # Agree to the EULA
+    if [[ -e "$working_dir/eula.txt" ]]; then
+        echo "Agreeing to Mojang's EULA..."
+        sed -i -r "s/^eula=.*/eula=true/g;" "$working_dir/eula.txt"
+    fi
+
+    # Set up server.properties
     if [[ -e "$working_dir/server.properties" ]]; then
+        echo "Configuring server..."
         cp "$working_dir/server.properties" "$working_dir/server.properties.bak"
         # TODO: Handle existence of config without existence of the properties we want to modify
         sed -i -r "s/^enable-rcon=.*/enable-rcon=true/g; s/^enforce-whitelist=.*/enforce-whitelist=${whitelist_enable}/g; s/^rcon\.password=.*/rcon\.password=${rcon_password}/g; s/^rcon\.port=.*/rcon\.port=${rcon_port}/g; s/^white-list=.*/white-list=${whitelist_enable}/g;" "$working_dir/server.properties"
+    else
+        echo "Error: '$working_dir/server.properties' was not found."
+        exit 1
     fi
 
     # Let's get this over with
